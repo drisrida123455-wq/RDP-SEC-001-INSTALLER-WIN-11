@@ -1,9 +1,9 @@
 name: SuperDMZ Private Installer
-description: Install SuperDMZ and return the installed client path
+description: Install SuperDMZ and return the client executable path
 
 outputs:
   client_exe:
-    description: Path to the installed SuperDMZ client
+    description: Installed SuperDMZ client executable path
     value: ${{ steps.find_client.outputs.client_exe }}
 
 runs:
@@ -11,7 +11,7 @@ runs:
 
   steps:
 
-    - name: Install SuperDMZ
+    - name: Install SuperDMZ Setup
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
@@ -30,13 +30,15 @@ runs:
             throw "SuperDMZ.exe was not found."
         }
 
+        if ((Get-Item $setup).Length -le 0) {
+            throw "SuperDMZ.exe is empty."
+        }
+
         New-Item `
             -ItemType Directory `
             -Path $installDir `
             -Force |
             Out-Null
-
-        Write-Host "[+] Running installer..." -ForegroundColor Cyan
 
         $installer = Start-Process `
             -FilePath $setup `
@@ -46,27 +48,28 @@ runs:
                 "/NORESTART"
                 "/DIR=`"$installDir`""
             ) `
+            -WorkingDirectory $installDir `
             -Wait `
             -PassThru
 
         Write-Host "[+] Installer ExitCode: $($installer.ExitCode)"
 
         if ($installer.ExitCode -ne 0) {
-            throw "SuperDMZ installer failed. ExitCode=$($installer.ExitCode)"
+            throw "SuperDMZ installation failed. ExitCode=$($installer.ExitCode)"
         }
 
-        Write-Host "[✓] Installer completed." -ForegroundColor Green
+        Write-Host "[✓] SuperDMZ installation completed." -ForegroundColor Green
 
         Start-Sleep -Seconds 5
 
 
-    - name: Find SuperDMZ Client
+    - name: Find Installed SuperDMZ Client
       id: find_client
       shell: pwsh
       run: |
         $ErrorActionPreference = "Stop"
 
-        Write-Host "[2/2] Searching for SuperDMZ client..." -ForegroundColor Cyan
+        Write-Host "[2/2] Finding installed SuperDMZ client..." -ForegroundColor Cyan
 
         $installDir = Join-Path `
             $env:RUNNER_TEMP `
@@ -82,14 +85,14 @@ runs:
 
         $clientExe = $null
 
-        # First try the known client name.
+        # Prefer the client name seen in your successful run.
         foreach ($root in $searchRoots) {
 
             if (-not (Test-Path $root)) {
                 continue
             }
 
-            $exact = Get-ChildItem `
+            $candidate = Get-ChildItem `
                 -Path $root `
                 -Recurse `
                 -File `
@@ -97,13 +100,13 @@ runs:
                 -ErrorAction SilentlyContinue |
                 Select-Object -First 1
 
-            if ($exact) {
-                $clientExe = $exact.FullName
+            if ($candidate) {
+                $clientExe = $candidate.FullName
                 break
             }
         }
 
-        # Fallback search.
+        # Fallback.
         if (-not $clientExe) {
 
             foreach ($root in $searchRoots) {
@@ -131,7 +134,7 @@ runs:
         }
 
         if (-not $clientExe) {
-            throw "Installed SuperDMZ client was not found."
+            throw "Installed SuperDMZ client executable was not found."
         }
 
         Write-Host "[✓] Client found:" -ForegroundColor Green
