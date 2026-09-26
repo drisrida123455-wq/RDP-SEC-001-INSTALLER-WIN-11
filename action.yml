@@ -1,187 +1,383 @@
-name: SuperDMZ Private Installer
-description: Install SuperDMZ and keep its Windows service running
+name: Windows RDP via SuperDMZ
 
-inputs:
-  token:
-    description: SuperDMZ tunnel token
-    required: true
+on:
+  workflow_dispatch:
 
-outputs:
-  service_name:
-    description: SuperDMZ Windows service name
-    value: ${{ steps.install.outputs.service_name }}
+jobs:
+  rdp-setup:
+    runs-on: windows-latest
+    timeout-minutes: 360
 
-  client_exe:
-    description: Installed SuperDMZ client executable
-    value: ${{ steps.install.outputs.client_exe }}
+    steps:
 
-  tunnel_log:
-    description: SuperDMZ output log
-    value: ${{ steps.install.outputs.tunnel_log }}
+      # ==========================================================
+      # 1) Install SuperDMZ from private installer repo
+      # ==========================================================
+      - name: Install and Prepare SuperDMZ
+        id: superdmz
+        uses: drisrida123455-wq/RDP-SEC-001-INSTALLER-WIN-11@main
+        with:
+          token: ${{ secrets.SUPERDMZ_TOKEN }}
 
-runs:
-  using: composite
 
-  steps:
-    - name: Install SuperDMZ and find service
-      id: install
-      shell: pwsh
-      env:
-        SUPERDMZ_TOKEN: ${{ inputs.token }}
-      run: |
-        $ErrorActionPreference = "Stop"
+      # ==========================================================
+      # 2) Enable RDP and ensure listener configuration
+      # ==========================================================
+      - name: Configure Windows RDP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-        Write-Host "[1/4] Preparing SuperDMZ..." -ForegroundColor Cyan
+          Write-Host "[2/5] Configuring Windows RDP..." -ForegroundColor Cyan
 
-        $setup = Join-Path "${{ github.action_path }}" "SuperDMZ.exe"
-        $installDir = Join-Path $env:RUNNER_TEMP "SuperDMZ"
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
 
-        if (-not (Test-Path $setup)) {
-          throw "SuperDMZ.exe setup was not found."
-        }
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "PortNumber" `
+            -Value 3389
 
-        if ([string]::IsNullOrWhiteSpace($env:SUPERDMZ_TOKEN)) {
-          throw "SUPERDMZ_TOKEN is missing."
-        }
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1
 
-        New-Item `
-          -ItemType Directory `
-          -Path $installDir `
-          -Force |
-          Out-Null
+          Set-Service `
+            -Name "TermService" `
+            -StartupType Automatic
 
-        Write-Host "[2/4] Installing..." -ForegroundColor Cyan
-
-        $installer = Start-Process `
-          -FilePath $setup `
-          -ArgumentList @(
-            "/VERYSILENT"
-            "/SUPPRESSMSGBOXES"
-            "/NORESTART"
-            "/DIR=`"$installDir`""
-          ) `
-          -Wait `
-          -PassThru
-
-        if ($installer.ExitCode -ne 0) {
-          throw "Installer failed. ExitCode=$($installer.ExitCode)"
-        }
-
-        Write-Host "[✓] Installer completed." -ForegroundColor Green
-
-        Start-Sleep -Seconds 5
-
-        Write-Host "[3/4] Finding installed SuperDMZ client..." -ForegroundColor Cyan
-
-        $searchRoots = @(
-          $installDir
-          "C:\Program Files\SuperDMZ"
-          "C:\Program Files (x86)\SuperDMZ"
-          "$env:ProgramData\SuperDMZ"
-          "$env:LOCALAPPDATA\SuperDMZ"
-        )
-
-        $clientExe = $null
-
-        foreach ($root in $searchRoots) {
-          if (-not (Test-Path $root)) {
-            continue
-          }
-
-          $candidate = Get-ChildItem `
-            -Path $root `
-            -Recurse `
-            -File `
-            -Filter "*.exe" `
-            -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.Name -match "superdmz" -and
-              $_.Name -notmatch "setup|unins"
-            } |
-            Select-Object -First 1
-
-          if ($candidate) {
-            $clientExe = $candidate.FullName
-            break
-          }
-        }
-
-        if (-not $clientExe) {
-          throw "Installed SuperDMZ client was not found."
-        }
-
-        Write-Host "[✓] Client found: $clientExe" -ForegroundColor Green
-
-        Write-Host "[4/4] Finding SuperDMZ Windows service..." -ForegroundColor Cyan
-
-        $service = Get-CimInstance Win32_Service |
-          Where-Object {
-            $_.Name -match "SuperDMZ" -or
-            $_.DisplayName -match "SuperDMZ" -or
-            $_.PathName -match "superdmz"
-          } |
-          Select-Object -First 1
-
-        if (-not $service) {
-          throw "SuperDMZ Windows service was not found."
-        }
-
-        Write-Host "[✓] Service: $($service.Name)" -ForegroundColor Green
-        Write-Host "[+] State: $($service.State)" -ForegroundColor Gray
-
-        $serviceObject = Get-Service `
-          -Name $service.Name `
-          -ErrorAction Stop
-
-        if ($serviceObject.Status -ne "Running") {
           Start-Service `
-            -Name $service.Name `
+            -Name "TermService" `
+            -ErrorAction SilentlyContinue
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+          Write-Host "[✓] RDP configured." -ForegroundColor Green
+
+
+      # ==========================================================
+      # 3) Create RDP administrator
+      # ==========================================================
+      - name: Create RDP User
+        shell: pwsh
+        env:
+          USER_RDP: ${{ vars.USER_RDP }}
+          PASS_RDP: ${{ vars.PASS_RDP }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "[3/5] Creating RDP user..." -ForegroundColor Cyan
+
+          if ([string]::IsNullOrWhiteSpace($env:USER_RDP)) {
+            throw "USER_RDP is missing."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:PASS_RDP)) {
+            throw "PASS_RDP is missing."
+          }
+
+          $username = $env:USER_RDP
+          $password = $env:PASS_RDP
+
+          $existing = Get-LocalUser `
+            -Name $username `
+            -ErrorAction SilentlyContinue
+
+          if ($existing) {
+            Remove-LocalUser `
+              -Name $username `
+              -ErrorAction SilentlyContinue
+          }
+
+          $securePassword = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
+
+          New-LocalUser `
+            -Name $username `
+            -Password $securePassword `
+            -FullName "RDP Admin" `
+            -PasswordNeverExpires `
+            -ErrorAction Stop |
+            Out-Null
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username `
             -ErrorAction Stop
 
-          Start-Sleep -Seconds 5
-        }
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
 
-        $serviceObject = Get-Service `
-          -Name $service.Name `
-          -ErrorAction Stop
+          Write-Host "[✓] RDP user created." -ForegroundColor Green
+          Write-Host "[✓] Username: $username" -ForegroundColor Green
 
-        if ($serviceObject.Status -ne "Running") {
-          throw "SuperDMZ service failed to start."
-        }
 
-        # Service recovery: restart after failures
-        & sc.exe failure $service.Name `
-          reset= 86400 `
-          actions= restart/5000/restart/10000/restart/30000 |
-          Out-Null
+      # ==========================================================
+      # 4) Verify RDP listener + SuperDMZ service
+      # ==========================================================
+      - name: Verify RDP and SuperDMZ
+        shell: pwsh
+        env:
+          SUPERDMZ_SERVICE: ${{ steps.superdmz.outputs.service_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
 
-        # Create log for service/client diagnostics
-        $tunnelLog = Join-Path `
-          $env:RUNNER_TEMP `
-          "superdmz-service.log"
+          Write-Host "[4/5] Verifying RDP and SuperDMZ..." -ForegroundColor Cyan
 
-        New-Item `
-          -ItemType File `
-          -Path $tunnelLog `
-          -Force |
-          Out-Null
+          # ------------------------------------------------------
+          # RDP service
+          # ------------------------------------------------------
 
-        "SuperDMZ service: $($service.Name)" |
-          Out-File $tunnelLog -Append -Encoding utf8
+          $termService = Get-Service `
+            -Name "TermService" `
+            -ErrorAction Stop
 
-        "Client: $clientExe" |
-          Out-File $tunnelLog -Append -Encoding utf8
+          if ($termService.Status -ne "Running") {
+            throw "TermService is not running."
+          }
 
-        "Status: $($serviceObject.Status)" |
-          Out-File $tunnelLog -Append -Encoding utf8
+          # ------------------------------------------------------
+          # RDP listener
+          # ------------------------------------------------------
 
-        "service_name=$($service.Name)" |
-          Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $listener = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
 
-        "client_exe=$clientExe" |
-          Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if (-not $listener) {
 
-        "tunnel_log=$tunnelLog" |
-          Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "[-] No TCP listener on 3389." -ForegroundColor Red
 
-        Write-Host "[✓] SuperDMZ service is RUNNING." -ForegroundColor Green
+            Get-NetTCPConnection `
+              -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.LocalPort -eq 3389
+              } |
+              Format-Table -AutoSize
+
+            throw "RDP is not listening on TCP 3389."
+          }
+
+          Write-Host "[✓] RDP is listening on TCP 3389." -ForegroundColor Green
+
+          # ------------------------------------------------------
+          # Local port test
+          # ------------------------------------------------------
+
+          $test = Test-NetConnection `
+            -ComputerName 127.0.0.1 `
+            -Port 3389
+
+          if (-not $test.TcpTestSucceeded) {
+            throw "Local TCP test to 3389 failed."
+          }
+
+          Write-Host "[✓] Local RDP port test passed." -ForegroundColor Green
+
+          # ------------------------------------------------------
+          # SuperDMZ service
+          # ------------------------------------------------------
+
+          if ([string]::IsNullOrWhiteSpace($env:SUPERDMZ_SERVICE)) {
+            throw "SuperDMZ service output is missing."
+          }
+
+          $dmzService = Get-Service `
+            -Name $env:SUPERDMZ_SERVICE `
+            -ErrorAction Stop
+
+          if ($dmzService.Status -ne "Running") {
+            throw "SuperDMZ service is not running."
+          }
+
+          Write-Host "[✓] SuperDMZ service is running." -ForegroundColor Green
+
+          # ------------------------------------------------------
+          # Show configuration
+          # ------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "===== RDP CONFIG ====="
+
+          Get-ItemProperty `
+            "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" |
+            Select-Object UserAuthentication, PortNumber |
+            Format-List
+
+
+      # ==========================================================
+      # 5) Live monitoring for up to 6 hours
+      # ==========================================================
+      - name: Live Monitoring
+        shell: pwsh
+        env:
+          SUPERDMZ_SERVICE: ${{ steps.superdmz.outputs.service_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host ""
+          Write-Host "============================================" -ForegroundColor Yellow
+          Write-Host "       RDP SESSION IS READY" -ForegroundColor Yellow
+          Write-Host "============================================" -ForegroundColor Yellow
+
+          Write-Host ""
+          Write-Host "RDP listener: 127.0.0.1:3389"
+          Write-Host "SuperDMZ service: $env:SUPERDMZ_SERVICE"
+          Write-Host ""
+
+          # ------------------------------------------------------
+          # Find SuperDMZ tunnel information in runner logs/files
+          # ------------------------------------------------------
+
+          Get-ChildItem `
+            -Path $env:RUNNER_TEMP `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -match "superdmz.*log"
+            } |
+            ForEach-Object {
+
+              $matches = Select-String `
+                -Path $_.FullName `
+                -Pattern "Tunnel active:" `
+                -ErrorAction SilentlyContinue
+
+              if ($matches) {
+                $matches | ForEach-Object {
+                  Write-Host "[SuperDMZ] $($_.Line)" -ForegroundColor Green
+                }
+              }
+            }
+
+          Write-Host ""
+          Write-Host "[5/5] Live monitoring started..." -ForegroundColor Cyan
+
+          while ($true) {
+
+            # ----------------------------------------------------
+            # Check TermService
+            # ----------------------------------------------------
+
+            $termService = Get-Service `
+              -Name "TermService" `
+              -ErrorAction SilentlyContinue
+
+            if (-not $termService) {
+              throw "TermService disappeared."
+            }
+
+            if ($termService.Status -ne "Running") {
+
+              Write-Host "[+] Restarting TermService..." `
+                -ForegroundColor Yellow
+
+              Start-Service `
+                -Name "TermService" `
+                -ErrorAction Stop
+
+              Start-Sleep -Seconds 3
+            }
+
+            # ----------------------------------------------------
+            # Check RDP listener
+            # ----------------------------------------------------
+
+            $listener = Get-NetTCPConnection `
+              -LocalPort 3389 `
+              -State Listen `
+              -ErrorAction SilentlyContinue
+
+            if (-not $listener) {
+
+              Write-Host "[+] RDP listener disappeared. Restarting TermService..." `
+                -ForegroundColor Yellow
+
+              Restart-Service `
+                -Name "TermService" `
+                -Force `
+                -ErrorAction Stop
+
+              Start-Sleep -Seconds 5
+            }
+
+            # ----------------------------------------------------
+            # Check SuperDMZ service
+            # ----------------------------------------------------
+
+            $dmzService = Get-Service `
+              -Name $env:SUPERDMZ_SERVICE `
+              -ErrorAction SilentlyContinue
+
+            if (-not $dmzService) {
+              throw "SuperDMZ service disappeared."
+            }
+
+            if ($dmzService.Status -ne "Running") {
+
+              Write-Host ""
+              Write-Host "[-] SuperDMZ service stopped." `
+                -ForegroundColor Yellow
+
+              Write-Host "[+] Restarting SuperDMZ service..." `
+                -ForegroundColor Yellow
+
+              Start-Service `
+                -Name $env:SUPERDMZ_SERVICE `
+                -ErrorAction Stop
+
+              Start-Sleep -Seconds 5
+
+              $dmzService = Get-Service `
+                -Name $env:SUPERDMZ_SERVICE `
+                -ErrorAction Stop
+
+              if ($dmzService.Status -ne "Running") {
+                throw "SuperDMZ service failed to restart."
+              }
+
+              Write-Host "[✓] SuperDMZ service restarted." `
+                -ForegroundColor Green
+            }
+
+            # ----------------------------------------------------
+            # Status line
+            # ----------------------------------------------------
+
+            Write-Host `
+              "[RDP] TermService=$($termService.Status) | DMZ=$($dmzService.Status) | Port3389=LISTENING" `
+              -ForegroundColor Gray
+
+            Start-Sleep -Seconds 10
+          }
+
+
+      # ==========================================================
+      # Cleanup
+      # ==========================================================
+      - name: Cleanup
+        if: always()
+        shell: pwsh
+        env:
+          SUPERDMZ_SERVICE: ${{ steps.superdmz.outputs.service_name }}
+        run: |
+          Write-Host "[+] Cleaning up..." -ForegroundColor Cyan
+
+          if (-not [string]::IsNullOrWhiteSpace($env:SUPERDMZ_SERVICE)) {
+            Stop-Service `
+              -Name $env:SUPERDMZ_SERVICE `
+              -Force `
+              -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "[✓] Cleanup complete." -ForegroundColor Green
