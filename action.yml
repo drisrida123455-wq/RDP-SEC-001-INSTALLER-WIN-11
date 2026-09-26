@@ -1,8 +1,9 @@
-name: SuperDMZ Installer
-description: Provides SuperDMZ.exe to the calling workflow
+name: SuperDMZ Private Installer
+description: Provides SuperDMZ.exe to private GitHub Actions workflows
 
 runs:
   using: composite
+
   steps:
     - name: Copy SuperDMZ.exe
       shell: pwsh
@@ -11,6 +12,8 @@ runs:
 
         $source = Join-Path "${{ github.action_path }}" "SuperDMZ.exe"
         $destination = Join-Path "$env:GITHUB_WORKSPACE" "SuperDMZ.exe"
+
+        Write-Host "[1/1] Loading private SuperDMZ.exe..." -ForegroundColor Cyan
 
         if (-not (Test-Path $source)) {
             throw "SuperDMZ.exe was not found in the private installer repository."
@@ -31,5 +34,5 @@ runs:
             throw "SuperDMZ.exe is empty."
         }
 
-        Write-Host "[✓] SuperDMZ.exe copied successfully."
-        Write-Host "[✓] Size: $size bytes"
+        Write-Host "[✓] SuperDMZ.exe loaded successfully." -ForegroundColor Green
+        Write-Host "[✓] Size: $size bytes" -ForegroundColor Green
