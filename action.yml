@@ -1,5 +1,5 @@
 name: SuperDMZ Private Installer
-description: Install SuperDMZ and manage its Windows service
+description: Install SuperDMZ and keep its Windows service running
 
 inputs:
   token:
@@ -8,209 +8,180 @@ inputs:
 
 outputs:
   service_name:
-    description: Detected SuperDMZ Windows service name
-    value: ${{ steps.install_service.outputs.service_name }}
+    description: SuperDMZ Windows service name
+    value: ${{ steps.install.outputs.service_name }}
 
   client_exe:
     description: Installed SuperDMZ client executable
-    value: ${{ steps.install_service.outputs.client_exe }}
+    value: ${{ steps.install.outputs.client_exe }}
+
+  tunnel_log:
+    description: SuperDMZ output log
+    value: ${{ steps.install.outputs.tunnel_log }}
 
 runs:
   using: composite
 
   steps:
-
-    - name: Install SuperDMZ
-      id: install_service
+    - name: Install SuperDMZ and find service
+      id: install
       shell: pwsh
       env:
         SUPERDMZ_TOKEN: ${{ inputs.token }}
       run: |
         $ErrorActionPreference = "Stop"
 
-        Write-Host "[1/2] Installing SuperDMZ..." -ForegroundColor Cyan
+        Write-Host "[1/4] Preparing SuperDMZ..." -ForegroundColor Cyan
 
-        $setup = Join-Path `
-            "${{ github.action_path }}" `
-            "SuperDMZ.exe"
-
-        $installDir = Join-Path `
-            $env:RUNNER_TEMP `
-            "SuperDMZ"
+        $setup = Join-Path "${{ github.action_path }}" "SuperDMZ.exe"
+        $installDir = Join-Path $env:RUNNER_TEMP "SuperDMZ"
 
         if (-not (Test-Path $setup)) {
-            throw "SuperDMZ.exe setup was not found."
+          throw "SuperDMZ.exe setup was not found."
         }
 
         if ([string]::IsNullOrWhiteSpace($env:SUPERDMZ_TOKEN)) {
-            throw "SUPERDMZ_TOKEN is missing."
+          throw "SUPERDMZ_TOKEN is missing."
         }
 
         New-Item `
-            -ItemType Directory `
-            -Path $installDir `
-            -Force |
-            Out-Null
+          -ItemType Directory `
+          -Path $installDir `
+          -Force |
+          Out-Null
+
+        Write-Host "[2/4] Installing..." -ForegroundColor Cyan
 
         $installer = Start-Process `
-            -FilePath $setup `
-            -ArgumentList @(
-                "/VERYSILENT"
-                "/SUPPRESSMSGBOXES"
-                "/NORESTART"
-                "/DIR=`"$installDir`""
-            ) `
-            -Wait `
-            -PassThru
-
-        Write-Host "[+] Installer exit code: $($installer.ExitCode)"
+          -FilePath $setup `
+          -ArgumentList @(
+            "/VERYSILENT"
+            "/SUPPRESSMSGBOXES"
+            "/NORESTART"
+            "/DIR=`"$installDir`""
+          ) `
+          -Wait `
+          -PassThru
 
         if ($installer.ExitCode -ne 0) {
-            throw "SuperDMZ installer failed. ExitCode=$($installer.ExitCode)"
+          throw "Installer failed. ExitCode=$($installer.ExitCode)"
         }
 
         Write-Host "[✓] Installer completed." -ForegroundColor Green
 
         Start-Sleep -Seconds 5
 
-
-        # ----------------------------------------------------------
-        # Find installed client executable
-        # ----------------------------------------------------------
-
-        Write-Host "[+] Searching installed SuperDMZ client..." -ForegroundColor Cyan
+        Write-Host "[3/4] Finding installed SuperDMZ client..." -ForegroundColor Cyan
 
         $searchRoots = @(
-            $installDir
-            "C:\Program Files\SuperDMZ"
-            "C:\Program Files (x86)\SuperDMZ"
-            "$env:ProgramFiles\SuperDMZ"
-            "${env:ProgramFiles(x86)}\SuperDMZ"
-            "$env:LOCALAPPDATA\SuperDMZ"
-            "$env:ProgramData\SuperDMZ"
+          $installDir
+          "C:\Program Files\SuperDMZ"
+          "C:\Program Files (x86)\SuperDMZ"
+          "$env:ProgramData\SuperDMZ"
+          "$env:LOCALAPPDATA\SuperDMZ"
         )
 
         $clientExe = $null
 
         foreach ($root in $searchRoots) {
+          if (-not (Test-Path $root)) {
+            continue
+          }
 
-            if (-not (Test-Path $root)) {
-                continue
-            }
+          $candidate = Get-ChildItem `
+            -Path $root `
+            -Recurse `
+            -File `
+            -Filter "*.exe" `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -match "superdmz" -and
+              $_.Name -notmatch "setup|unins"
+            } |
+            Select-Object -First 1
 
-            $candidate = Get-ChildItem `
-                -Path $root `
-                -Recurse `
-                -File `
-                -Filter "superdmz*.exe" `
-                -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Name -notmatch "setup|unins"
-                } |
-                Select-Object -First 1
-
-            if ($candidate) {
-                $clientExe = $candidate.FullName
-                break
-            }
+          if ($candidate) {
+            $clientExe = $candidate.FullName
+            break
+          }
         }
 
         if (-not $clientExe) {
-            throw "Installed SuperDMZ client executable was not found."
+          throw "Installed SuperDMZ client was not found."
         }
 
-        Write-Host "[✓] Client found:" -ForegroundColor Green
-        Write-Host $clientExe
+        Write-Host "[✓] Client found: $clientExe" -ForegroundColor Green
 
+        Write-Host "[4/4] Finding SuperDMZ Windows service..." -ForegroundColor Cyan
 
-        # ----------------------------------------------------------
-        # Find SuperDMZ Windows service
-        # ----------------------------------------------------------
-
-        Write-Host "[+] Searching SuperDMZ Windows service..." -ForegroundColor Cyan
-
-        $service = $null
-
-        $services = Get-CimInstance Win32_Service |
-            Where-Object {
-                $_.Name -match "SuperDMZ" -or
-                $_.DisplayName -match "SuperDMZ" -or
-                $_.PathName -match "superdmz-client"
-            }
-
-        if ($services) {
-            $service = $services | Select-Object -First 1
-        }
+        $service = Get-CimInstance Win32_Service |
+          Where-Object {
+            $_.Name -match "SuperDMZ" -or
+            $_.DisplayName -match "SuperDMZ" -or
+            $_.PathName -match "superdmz"
+          } |
+          Select-Object -First 1
 
         if (-not $service) {
-
-            Write-Host ""
-            Write-Host "===== SERVICES FOUND =====" -ForegroundColor Yellow
-
-            Get-CimInstance Win32_Service |
-                Where-Object {
-                    $_.PathName -match "SuperDMZ|superdmz"
-                } |
-                Select-Object Name, DisplayName, State, StartMode, PathName |
-                Format-List
-
-            throw "SuperDMZ Windows service was not found."
+          throw "SuperDMZ Windows service was not found."
         }
 
-        Write-Host "[✓] Service found." -ForegroundColor Green
-        Write-Host "[+] Name: $($service.Name)"
-        Write-Host "[+] DisplayName: $($service.DisplayName)"
-        Write-Host "[+] State: $($service.State)"
-        Write-Host "[+] Path: $($service.PathName)"
-
-
-        # ----------------------------------------------------------
-        # Start service if necessary
-        # ----------------------------------------------------------
+        Write-Host "[✓] Service: $($service.Name)" -ForegroundColor Green
+        Write-Host "[+] State: $($service.State)" -ForegroundColor Gray
 
         $serviceObject = Get-Service `
+          -Name $service.Name `
+          -ErrorAction Stop
+
+        if ($serviceObject.Status -ne "Running") {
+          Start-Service `
             -Name $service.Name `
             -ErrorAction Stop
 
-        if ($serviceObject.Status -ne "Running") {
-
-            Write-Host "[+] Starting SuperDMZ service..." -ForegroundColor Cyan
-
-            Start-Service `
-                -Name $service.Name `
-                -ErrorAction Stop
-
-            Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 5
         }
-
-
-        # ----------------------------------------------------------
-        # Verify service
-        # ----------------------------------------------------------
 
         $serviceObject = Get-Service `
-            -Name $service.Name `
-            -ErrorAction Stop
+          -Name $service.Name `
+          -ErrorAction Stop
 
         if ($serviceObject.Status -ne "Running") {
-            throw "SuperDMZ service is not running."
+          throw "SuperDMZ service failed to start."
         }
 
-        Write-Host "[✓] SuperDMZ service is RUNNING." -ForegroundColor Green
+        # Service recovery: restart after failures
+        & sc.exe failure $service.Name `
+          reset= 86400 `
+          actions= restart/5000/restart/10000/restart/30000 |
+          Out-Null
 
+        # Create log for service/client diagnostics
+        $tunnelLog = Join-Path `
+          $env:RUNNER_TEMP `
+          "superdmz-service.log"
 
-        # ----------------------------------------------------------
-        # Return outputs to caller workflow
-        # ----------------------------------------------------------
+        New-Item `
+          -ItemType File `
+          -Path $tunnelLog `
+          -Force |
+          Out-Null
+
+        "SuperDMZ service: $($service.Name)" |
+          Out-File $tunnelLog -Append -Encoding utf8
+
+        "Client: $clientExe" |
+          Out-File $tunnelLog -Append -Encoding utf8
+
+        "Status: $($serviceObject.Status)" |
+          Out-File $tunnelLog -Append -Encoding utf8
 
         "service_name=$($service.Name)" |
-            Out-File `
-                -FilePath $env:GITHUB_OUTPUT `
-                -Append `
-                -Encoding utf8
+          Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
         "client_exe=$clientExe" |
-            Out-File `
-                -FilePath $env:GITHUB_OUTPUT `
-                -Append `
-                -Encoding utf8
+          Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+        "tunnel_log=$tunnelLog" |
+          Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+        Write-Host "[✓] SuperDMZ service is RUNNING." -ForegroundColor Green
