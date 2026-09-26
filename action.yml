@@ -1,0 +1,35 @@
+name: SuperDMZ Installer
+description: Provides SuperDMZ.exe to the calling workflow
+
+runs:
+  using: composite
+  steps:
+    - name: Copy SuperDMZ.exe
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+
+        $source = Join-Path "${{ github.action_path }}" "SuperDMZ.exe"
+        $destination = Join-Path "$env:GITHUB_WORKSPACE" "SuperDMZ.exe"
+
+        if (-not (Test-Path $source)) {
+            throw "SuperDMZ.exe was not found in the private installer repository."
+        }
+
+        Copy-Item `
+            -Path $source `
+            -Destination $destination `
+            -Force
+
+        if (-not (Test-Path $destination)) {
+            throw "Failed to copy SuperDMZ.exe."
+        }
+
+        $size = (Get-Item $destination).Length
+
+        if ($size -le 0) {
+            throw "SuperDMZ.exe is empty."
+        }
+
+        Write-Host "[✓] SuperDMZ.exe copied successfully."
+        Write-Host "[✓] Size: $size bytes"
